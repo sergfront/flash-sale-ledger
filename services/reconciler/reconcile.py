@@ -36,7 +36,8 @@ def reconcile_once(conn, http):
             "FROM orders o JOIN reservations r ON r.order_id=o.id "
             "JOIN payment_operations p ON p.order_id=o.id "
             "WHERE o.status IN ('PENDING_PAYMENT','PAYMENT_REVIEW','REFUND_PENDING') "
-            "AND p.status IN ('IN_FLIGHT','UNKNOWN','SUCCEEDED','FAILED') "
+            "AND p.status IN ('IN_FLIGHT','UNKNOWN','SUCCEEDED') "
+            "AND NOT (o.status='REFUND_PENDING' AND p.kind='CAPTURE') "
             "ORDER BY o.updated_at LIMIT 200"
         )
         operations = cursor.fetchall()
@@ -47,9 +48,8 @@ def reconcile_once(conn, http):
             response = http.get(PAYMENT_URL + "/operations/" + provider_key)
             if response.status_code == 404:
                 if kind == "CAPTURE" and expires_at + timedelta(seconds=30) < datetime.now(timezone.utc):
-                    result = {"order_id": str(order_id), "kind": kind, "status": "FAILED"}
-                else:
-                    continue
+                    record_case(conn, order_id, "PAYMENT_NOT_FOUND", {"provider_key": provider_key})
+                continue
             else:
                 response.raise_for_status()
                 payment = response.json()
@@ -58,6 +58,7 @@ def reconcile_once(conn, http):
                     "kind": kind,
                     "status": payment["status"],
                     "occurred_at": payment["occurred_at"],
+                    "provider_key": provider_key,
                 }
             settled = http.post(
                 API_URL + "/internal/settle",
@@ -70,7 +71,7 @@ def reconcile_once(conn, http):
             with conn.cursor() as cursor:
                 cursor.execute(
                     "UPDATE reconciliation_cases SET resolved_at=clock_timestamp() "
-                    "WHERE order_id=%s AND kind='PAYMENT_RECONCILIATION' AND resolved_at IS NULL",
+                    "WHERE order_id=%s AND kind IN ('PAYMENT_RECONCILIATION','PAYMENT_NOT_FOUND') AND resolved_at IS NULL",
                     (order_id,),
                 )
                 conn.commit()

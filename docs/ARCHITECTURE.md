@@ -92,11 +92,12 @@ stateDiagram-v2
 | `GET /cart`, `PUT /cart/items/:sku` | Корзина демо-пользователя |
 | `POST /orders` | `201` с заказом либо сохранённый `409 OUT_OF_STOCK`; заголовки `x-user-id`, `Idempotency-Key` |
 | `GET /orders/:id` | Состояние, позиции, резерв и платёжные операции владельца |
-| `POST /orders/:id/cancel` | Отмена или начало возврата |
+| `POST /orders/:id/cancel` | Идемпотентная отмена или начало возврата по ключу запроса |
 | `POST /payment-webhooks/simulator` | Подписанное событие симулятора |
 | `POST /internal/settle` | Применение результата сверки через общую машину состояний |
 | `GET /operator/inventory`, `POST /operator/inventory/:sku/adjust` | Проверка и изменение доступного остатка |
 | `GET /operator/reconciliation`, `POST /operator/orders/:id/refund` | Разбор исключений и возврат |
+| `POST /operator/orders/:id/refund/retry` | Новая попытка неуспешного возврата с новым ключом провайдера |
 
 Внешние клиенты должны использовать настоящую аутентификацию и права доступа; `x-user-id` и локальный токен оператора здесь демонстрационные.
 

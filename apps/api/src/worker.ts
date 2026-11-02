@@ -46,7 +46,7 @@ async function processOne(row: { id: string; kind: string; aggregate_id: string 
   if (!response.ok) throw new Error('payment service returned ' + response.status);
   const result = await response.json() as { status: 'SUCCEEDED' | 'FAILED'; occurred_at: string };
   if (row.kind === 'CAPTURE') await settleCapture(orderId, result);
-  else await settleRefund(orderId, result);
+  else await settleRefund(orderId, { ...result, provider_key: op.provider_key });
   await pool.query("UPDATE outbox SET status='DONE',lease_until=NULL WHERE id=$1", [row.id]);
 }
 

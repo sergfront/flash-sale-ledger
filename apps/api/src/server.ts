@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from 'node:crypto';
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
 import { HttpError, pool, transaction } from './db.js';
-import { adjustStock, cancelOrder, createOrder, settleCapture, settleRefund } from './domain.js';
+import { adjustStock, cancelOrder, createOrder, retryRefund, settleCapture, settleRefund } from './domain.js';
 
 const app = Fastify({ logger: true, bodyLimit: 128 * 1024 });
 await app.register(cors, { origin: true });
@@ -45,8 +45,11 @@ app.get('/health', async () => {
   return { ok: true };
 });
 app.get<{ Querystring: { limit?: string; offset?: string } }>('/products', async (request) => {
-  const limit = Math.min(100, Math.max(1, Number(request.query.limit) || 24));
-  const offset = Math.max(0, Number(request.query.offset) || 0);
+  const rawLimit = request.query.limit === undefined ? 24 : Number(request.query.limit);
+  const rawOffset = request.query.offset === undefined ? 0 : Number(request.query.offset);
+  if (!Number.isSafeInteger(rawLimit) || rawLimit < 1 || !Number.isSafeInteger(rawOffset) || rawOffset < 0) throw new HttpError(400, 'invalid pagination');
+  const limit = Math.min(100, rawLimit);
+  const offset = rawOffset;
   const result = await pool.query(
     'SELECT p.sku,p.name,p.description,p.price_cents,p.currency,p.image_url,i.available FROM products p JOIN inventory i USING(sku) WHERE p.active=true ORDER BY p.sku LIMIT $1 OFFSET $2',
     [limit, offset],
@@ -97,7 +100,7 @@ app.get<{ Params: { id: string } }>('/orders/:id', async (request) => {
 });
 app.post<{ Params: { id: string } }>('/orders/:id/cancel', async (request) => {
   if (!key(request.headers)) throw new HttpError(400, 'Idempotency-Key required');
-  return cancelOrder(request.params.id, userId(request.headers));
+  return cancelOrder(request.params.id, userId(request.headers), key(request.headers));
 });
 
 app.post<{ Body: { event_id: string; order_id: string; kind: 'CAPTURE' | 'REFUND'; status: 'SUCCEEDED' | 'FAILED'; occurred_at: string } }>(
@@ -152,6 +155,10 @@ app.post<{ Params: { id: string } }>('/operator/orders/:id/refund', async (reque
   const result = await pool.query('SELECT user_id FROM orders WHERE id=$1', [request.params.id]);
   if (!result.rowCount) throw new HttpError(404, 'order not found');
   return cancelOrder(request.params.id, result.rows[0].user_id);
+});
+app.post<{ Params: { id: string } }>('/operator/orders/:id/refund/retry', async (request) => {
+  operator(request.headers);
+  return retryRefund(request.params.id);
 });
 
 await app.listen({ host: '0.0.0.0', port: Number(process.env.API_PORT ?? 3000) });

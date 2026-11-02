@@ -16,7 +16,7 @@ if (!exists.rowCount) await maintenance.query('CREATE DATABASE "' + databaseName
 await maintenance.end();
 process.env.DATABASE_URL = testUrl.toString();
 const { pool } = await import('../src/db.js');
-const { createOrder, cancelOrder, settleCapture, settleRefund, expireDue } = await import('../src/domain.js');
+const { createOrder, beginPayment, cancelOrder, retryRefund, settleCapture, settleRefund, expireDue } = await import('../src/domain.js');
 await pool.query(await readFile('../../db/schema.sql', 'utf8'));
 
 test('5,000 buyers cannot reserve more than 100 units', { timeout: 120_000 }, async () => {
@@ -99,6 +99,47 @@ test('capture arriving after reserve release creates a refund, not a sale', asyn
   await settleRefund(id, { status: 'SUCCEEDED', occurred_at: new Date().toISOString() });
   const refunded = await pool.query('SELECT status FROM orders WHERE id=$1', [id]);
   assert.equal(refunded.rows[0].status, 'REFUNDED');
+  await pool.query('UPDATE products SET active=false WHERE sku=$1', [sku]);
+});
+
+test('failed refund can be retried with a new provider key; stale event cannot settle the new attempt', async () => {
+  const sku = 'refund-' + randomUUID().slice(0, 8);
+  await pool.query("INSERT INTO products(sku,name,price_cents,active) VALUES($1,'Refund fixture',100,true)", [sku]);
+  await pool.query('INSERT INTO inventory(sku,total,available,reserved,sold) VALUES($1,1,1,0,0)', [sku]);
+  const created = await createOrder('refund-buyer', sku, [{ sku, quantity: 1 }]);
+  const id = created.body.id;
+  await settleCapture(id, { status: 'SUCCEEDED', occurred_at: new Date().toISOString() });
+  const firstCancel = await cancelOrder(id, 'refund-buyer', 'cancel-' + sku);
+  assert.equal(firstCancel.status, 'REFUND_PENDING');
+  await settleRefund(id, { status: 'FAILED', provider_key: 'refund:' + id });
+  const retried = await retryRefund(id);
+  assert.notEqual(retried.provider_key, 'refund:' + id);
+  assert.deepEqual(await settleRefund(id, { status: 'FAILED', provider_key: 'refund:' + id }), { stale: true });
+  await settleRefund(id, { status: 'SUCCEEDED', provider_key: retried.provider_key, occurred_at: new Date().toISOString() });
+  const replay = await cancelOrder(id, 'refund-buyer', 'cancel-' + sku);
+  assert.deepEqual(replay, firstCancel);
+  const order = await pool.query('SELECT status FROM orders WHERE id=$1', [id]);
+  assert.equal(order.rows[0].status, 'REFUNDED');
+  const operations = await pool.query("SELECT count(*)::int AS n FROM payment_operations WHERE order_id=$1 AND kind='REFUND'", [id]);
+  assert.equal(operations.rows[0].n, 2);
+  await pool.query('UPDATE products SET active=false WHERE sku=$1', [sku]);
+});
+
+test('API process clock skew does not expire a new reservation', async () => {
+  const sku = 'clock-' + randomUUID().slice(0, 8);
+  await pool.query("INSERT INTO products(sku,name,price_cents,active) VALUES($1,'Clock fixture',100,true)", [sku]);
+  await pool.query('INSERT INTO inventory(sku,total,available,reserved,sold) VALUES($1,1,1,0,0)', [sku]);
+  const created = await createOrder('clock-buyer', sku, [{ sku, quantity: 1 }]);
+  const realNow = Date.now;
+  try {
+    Date.now = () => realNow() + 10 * 60_000;
+    const payment = await beginPayment(created.body.id, 'CAPTURE');
+    assert.equal(payment?.provider_key, 'capture:' + created.body.id);
+  } finally {
+    Date.now = realNow;
+  }
+  const reservation = await pool.query('SELECT status FROM reservations WHERE order_id=$1', [created.body.id]);
+  assert.equal(reservation.rows[0].status, 'HELD');
   await pool.query('UPDATE products SET active=false WHERE sku=$1', [sku]);
 });
 

@@ -15,7 +15,7 @@ async function request<T>(path: string, init: RequestInit = {}, extra: Record<st
     headers: { 'content-type': 'application/json', 'x-user-id': user, ...extra, ...init.headers },
   });
   const body = await response.json();
-  if (!response.ok) throw new Error(body.error || 'Request failed');
+  if (!response.ok) throw Object.assign(new Error(body.error || 'Request failed'), { status: response.status });
   return body as T;
 }
 
@@ -27,8 +27,10 @@ function App() {
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [operatorToken, setOperatorToken] = useState(sessionStorage.getItem('operator-token') || '');
+  const [operatorDraft, setOperatorDraft] = useState('');
+  const [checkoutAttempt, setCheckoutAttempt] = useState<{ key: string; payload: string } | null>(() => { try { return JSON.parse(sessionStorage.getItem('checkout-attempt') || 'null'); } catch { return null; } });
   const [inventory, setInventory] = useState<(Product & { total: number; reserved: number; sold: number })[]>([]);
-  const [review, setReview] = useState<{ review: { id: string; status: string }[]; cases: { id: string; kind: string }[]; outbox_pending: number } | null>(null);
+  const [review, setReview] = useState<{ review: { id: string; status: string }[]; cases: { id: string; order_id: string | null; kind: string }[]; outbox_pending: number } | null>(null);
 
   const refresh = async () => {
     try {
@@ -47,6 +49,7 @@ function App() {
   }, [order?.id, order?.status]);
   const refreshProducts = async () => setProducts(await request<Product[]>('/products'));
   const updateCart = async (sku: string, quantity: number) => {
+    if (checkoutAttempt) { setMessage('Resolve the pending order attempt before changing your bag.'); return; }
     try {
       await request('/cart/items/' + sku, { method: 'PUT', body: JSON.stringify({ quantity }) });
       setCart(current => ({ ...current, [sku]: quantity }));
@@ -54,21 +57,41 @@ function App() {
     } catch (error) { setMessage(String(error)); }
   };
   const checkout = async () => {
-    const items = Object.entries(cart).filter(([, quantity]) => quantity > 0).map(([sku, quantity]) => ({ sku, quantity }));
-    if (!items.length) return;
+    const items = Object.entries(cart).filter(([, quantity]) => quantity > 0).map(([sku, quantity]) => ({ sku, quantity })).sort((a, b) => a.sku.localeCompare(b.sku));
+    if (!items.length && !checkoutAttempt) return;
     setBusy(true); setMessage('');
     try {
-      const created = await request<Order>('/orders', { method: 'POST', body: JSON.stringify({ items }) }, { 'Idempotency-Key': crypto.randomUUID() });
+      const payload = JSON.stringify({ items });
+      const attempt = checkoutAttempt || { key: crypto.randomUUID(), payload };
+      const attemptedItems = (JSON.parse(attempt.payload) as { items: { sku: string; quantity: number }[] }).items;
+      setCheckoutAttempt(attempt);
+      sessionStorage.setItem('checkout-attempt', JSON.stringify(attempt));
+      const created = await request<Order>('/orders', { method: 'POST', body: attempt.payload }, { 'Idempotency-Key': attempt.key });
+      setCheckoutAttempt(null);
+      sessionStorage.removeItem('checkout-attempt');
       setOrder(created);
-      await Promise.all(items.map(item => request('/cart/items/' + item.sku, { method: 'PUT', body: JSON.stringify({ quantity: 0 }) })));
+      setCart({});
+      await Promise.all(attemptedItems.map(item => request('/cart/items/' + item.sku, { method: 'PUT', body: JSON.stringify({ quantity: 0 }) })));
       setCart({});
       await refreshProducts();
-    } catch (error) { setMessage(String(error)); }
+    } catch (error) {
+      if ((error as { status?: number }).status === 409) {
+        setCheckoutAttempt(null);
+        sessionStorage.removeItem('checkout-attempt');
+      }
+      setMessage(String(error));
+    }
     finally { setBusy(false); }
   };
   const cancel = async () => {
     if (!order) return;
-    try { setOrder({ ...order, ...await request<Order>('/orders/' + order.id + '/cancel', { method: 'POST' }, { 'Idempotency-Key': crypto.randomUUID() }) }); }
+    const storageKey = 'cancel-key:' + order.id;
+    const attemptKey = sessionStorage.getItem(storageKey) || crypto.randomUUID();
+    sessionStorage.setItem(storageKey, attemptKey);
+    try {
+      setOrder({ ...order, ...await request<Order>('/orders/' + order.id + '/cancel', { method: 'POST' }, { 'Idempotency-Key': attemptKey }) });
+      sessionStorage.removeItem(storageKey);
+    }
     catch (error) { setMessage(String(error)); }
   };
   const refreshOperator = async () => {
@@ -87,6 +110,12 @@ function App() {
     try {
       await request('/operator/inventory/' + sku + '/adjust', { method: 'POST', body: JSON.stringify({ delta }) }, { 'x-operator-token': operatorToken });
       await refreshOperator(); await refreshProducts();
+    } catch (error) { setMessage(String(error)); }
+  };
+  const retryRefund = async (id: string) => {
+    try {
+      await request('/operator/orders/' + id + '/refund/retry', { method: 'POST' }, { 'x-operator-token': operatorToken });
+      await refreshOperator();
     } catch (error) { setMessage(String(error)); }
   };
   const itemCount = Object.values(cart).reduce((sum, n) => sum + n, 0);
@@ -118,21 +147,22 @@ function App() {
           {products.map((product, index) => <article className="product" key={product.sku}>
             <div className="product-image"><img src={product.image_url} alt={product.name}/><span className="index">0{index + 1}</span></div>
             <div className="product-info"><div><h3>{product.name}</h3><p>{product.description}</p></div><strong>{money(product.price_cents)}</strong></div>
-            <div className="product-action"><span>{product.available > 0 ? product.available + ' AVAILABLE' : 'SOLD OUT'}</span><button disabled={product.available === 0} onClick={() => void updateCart(product.sku, (cart[product.sku] || 0) + 1)}>{cart[product.sku] ? 'ADD ANOTHER +' : 'ADD TO BAG +'}</button></div>
+            <div className="product-action"><span>{product.available > 0 ? product.available + ' AVAILABLE' : 'SOLD OUT'}</span><button disabled={product.available === 0 || !!checkoutAttempt} onClick={() => void updateCart(product.sku, (cart[product.sku] || 0) + 1)}>{cart[product.sku] ? 'ADD ANOTHER +' : 'ADD TO BAG +'}</button></div>
           </article>)}
         </div>
       </section>
       <aside className="bag">
-        <div><span className="eyebrow dark">YOUR BAG / {itemCount} ITEMS</span><div className="bag-items">{Object.entries(cart).filter(([, q]) => q > 0).map(([sku, quantity]) => <div key={sku}><span>{products.find(p => p.sku === sku)?.name || sku} <small>× {quantity}</small></span><button onClick={() => void updateCart(sku, quantity - 1)}>−</button></div>)}{!itemCount && <p>Nothing in your bag yet.</p>}</div></div>
-        <div className="bag-checkout"><div><span>TOTAL</span><strong>{money(total)}</strong></div><button disabled={!itemCount || busy} onClick={() => void checkout()}>{busy ? 'PLACING ORDER…' : 'PLACE ORDER'} <span>↗</span></button></div>
+        <div><span className="eyebrow dark">YOUR BAG / {itemCount} ITEMS</span><div className="bag-items">{Object.entries(cart).filter(([, q]) => q > 0).map(([sku, quantity]) => <div key={sku}><span>{products.find(p => p.sku === sku)?.name || sku} <small>× {quantity}</small></span><button disabled={!!checkoutAttempt} onClick={() => void updateCart(sku, quantity - 1)}>−</button></div>)}{!itemCount && <p>Nothing in your bag yet.</p>}</div></div>
+        <div className="bag-checkout"><div><span>TOTAL</span><strong>{money(total)}</strong></div><button disabled={(!itemCount && !checkoutAttempt) || busy} onClick={() => void checkout()}>{busy ? 'PLACING ORDER…' : checkoutAttempt ? 'RETRY ORDER' : 'PLACE ORDER'} <span>↗</span></button></div>
       </aside>
       {order && <section className="order-strip"><div><span className="eyebrow">LATEST ORDER / {order.id.slice(0, 8)}</span><h2>{order.status.replaceAll('_', ' ')}</h2><p>{order.status === 'PAYMENT_REVIEW' ? 'The payment outcome is being checked. Your reservation stays held meanwhile.' : order.status === 'CONFIRMED' ? 'Your order is confirmed.' : 'Keep this page open for the latest status.'}</p></div><div><span>{money(order.amount_cents)}</span><button onClick={() => void cancel()} disabled={['CANCELLED','REFUNDED','EXPIRED','PAYMENT_FAILED'].includes(order.status)}>CANCEL / REFUND ↗</button></div></section>}
     </> : <main className="operations">
       <div className="ops-title"><div><span className="eyebrow dark">DROP / CONTROL ROOM</span><h1>Operations</h1><p>Inventory, payment review and reconciliation.</p></div><button className="outline" onClick={() => void refreshOperator()}>REFRESH ↻</button></div>
-      {!operatorToken ? <div className="token-entry"><label htmlFor="operator-token">OPERATOR TOKEN</label><input id="operator-token" type="password" placeholder="Enter local demo token" onChange={event => { sessionStorage.setItem('operator-token', event.target.value); setOperatorToken(event.target.value); }}/></div> : <>
+      {!operatorToken ? <div className="token-entry"><label htmlFor="operator-token">OPERATOR TOKEN</label><input id="operator-token" type="password" placeholder="Enter local demo token" value={operatorDraft} onChange={event => setOperatorDraft(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') { sessionStorage.setItem('operator-token', operatorDraft); setOperatorToken(operatorDraft); } }}/><button onClick={() => { sessionStorage.setItem('operator-token', operatorDraft); setOperatorToken(operatorDraft); }}>CONNECT</button></div> : <>
+        <button className="outline" onClick={() => { sessionStorage.removeItem('operator-token'); setOperatorToken(''); setOperatorDraft(''); }}>CHANGE TOKEN</button>
         <div className="ops-stats"><div><span>SKUS</span><strong>{inventory.length}</strong></div><div><span>RESERVED UNITS</span><strong>{inventory.reduce((n, i) => n + i.reserved, 0)}</strong></div><div><span>ORDERS IN REVIEW</span><strong>{review?.review.length ?? '—'}</strong></div><div><span>OUTBOX PENDING</span><strong>{review?.outbox_pending ?? '—'}</strong></div></div>
         <section className="ops-section"><div className="ops-section-head"><h2>Inventory</h2><span>ADJUST AVAILABLE STOCK</span></div><div className="table-wrap"><table><thead><tr><th>SKU</th><th>AVAILABLE</th><th>RESERVED</th><th>SOLD</th><th>TOTAL</th><th>ACTION</th></tr></thead><tbody>{inventory.map(row => <tr key={row.sku}><td><strong>{row.name}</strong><small>{row.sku}</small></td><td>{row.available}</td><td>{row.reserved}</td><td>{row.sold}</td><td>{row.total}</td><td><button onClick={() => void adjust(row.sku, 10)}>+10</button><button onClick={() => void adjust(row.sku, -10)}>−10</button></td></tr>)}</tbody></table></div></section>
-        <section className="ops-section"><div className="ops-section-head"><h2>Payment review</h2><span>{review?.review.length ?? 0} OPEN</span></div>{review?.review.length ? review.review.map(row => <div className="review-row" key={row.id}><code>{row.id}</code><span>{row.status}</span></div>) : <p className="empty">No orders need review.</p>}</section>
+        <section className="ops-section"><div className="ops-section-head"><h2>Payment review</h2><span>{review?.review.length ?? 0} OPEN</span></div>{review?.review.length ? review.review.map(row => <div className="review-row" key={row.id}><code>{row.id}</code><span>{row.status}</span>{review.cases.some(item => item.order_id === row.id && item.kind === 'REFUND_FAILED') && <button onClick={() => void retryRefund(row.id)}>RETRY FAILED REFUND</button>}</div>) : <p className="empty">No orders need review.</p>}</section>
         <section className="ops-section"><div className="ops-section-head"><h2>Reconciliation cases</h2><span>{review?.cases.length ?? 0} OPEN</span></div>{review?.cases.length ? review.cases.map(row => <div className="review-row" key={row.id}><code>{row.id.slice(0, 8)}</code><span>{row.kind}</span></div>) : <p className="empty">No unresolved discrepancies.</p>}</section>
       </>}
     </main>}
