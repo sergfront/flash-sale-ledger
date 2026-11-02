@@ -1,0 +1,95 @@
+services:
+  db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: sale
+      POSTGRES_PASSWORD: sale
+      POSTGRES_DB: sale
+    ports: ["5435:5432"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U sale -d sale"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    volumes: ["sale_data:/var/lib/postgresql/data"]
+  payment_db:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: pay
+      POSTGRES_PASSWORD: pay
+      POSTGRES_DB: pay
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pay -d pay"]
+      interval: 2s
+      timeout: 2s
+      retries: 20
+    volumes: ["payment_data:/var/lib/postgresql/data"]
+  simulator:
+    build:
+      context: .
+      dockerfile: Dockerfile.node
+      args: { APP: simulator }
+    command: node apps/simulator/dist/server.js
+    environment:
+      PAYMENT_DATABASE_URL: postgres://pay:pay@payment_db:5432/pay
+      API_WEBHOOK_URL: http://api:3000/payment-webhooks/simulator
+      WEBHOOK_SECRET: local-demo-secret
+      SIMULATOR_PORT: 3001
+      SIM_FAIL_RATE: ${SIM_FAIL_RATE:-0}
+      SIM_TIMEOUT_AFTER_COMMIT_RATE: ${SIM_TIMEOUT_AFTER_COMMIT_RATE:-0}
+      SIM_DROP_WEBHOOK_RATE: ${SIM_DROP_WEBHOOK_RATE:-0}
+    ports: ["3001:3001"]
+    depends_on:
+      payment_db: { condition: service_healthy }
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.node
+      args: { APP: api }
+    command: sh -c "npm run migrate -w apps/api && npm run seed -w apps/api && node apps/api/dist/server.js"
+    environment:
+      DATABASE_URL: postgres://sale:sale@db:5432/sale
+      PAYMENT_URL: http://simulator:3001
+      WEBHOOK_SECRET: local-demo-secret
+      OPERATOR_TOKEN: local-operator-token
+      API_PORT: 3000
+    ports: ["3003:3000"]
+    depends_on:
+      db: { condition: service_healthy }
+      simulator: { condition: service_started }
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.node
+      args: { APP: api }
+    command: node apps/api/dist/worker.js
+    environment:
+      DATABASE_URL: postgres://sale:sale@db:5432/sale
+      PAYMENT_URL: http://simulator:3001
+    depends_on:
+      api: { condition: service_started }
+  reconciler:
+    build:
+      context: .
+      dockerfile: services/reconciler/Dockerfile
+    environment:
+      DATABASE_URL: postgres://sale:sale@db:5432/sale
+      PAYMENT_URL: http://simulator:3001
+      API_URL: http://api:3000
+      OPERATOR_TOKEN: local-operator-token
+    depends_on:
+      api: { condition: service_started }
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.node
+      args: { APP: web }
+    command: npm run dev -w apps/web
+    environment:
+      VITE_API_URL: http://localhost:3003
+    ports: ["5173:5173"]
+    depends_on:
+      api: { condition: service_started }
+volumes:
+  sale_data:
+  payment_data:

@@ -1,0 +1,12 @@
+{
+  "name": "flash-sale-platform",
+  "private": true,
+  "workspaces": ["apps/api", "apps/simulator", "apps/web"],
+  "scripts": {
+    "build": "npm run build -w apps/api && npm run build -w apps/simulator && npm run build -w apps/web",
+    "test": "npm run test -w apps/api",
+    "dev:api": "npm run dev -w apps/api",
+    "dev:simulator": "npm run dev -w apps/simulator",
+    "dev:web": "npm run dev -w apps/web"
+  }
+}
