@@ -72,7 +72,7 @@ npm run build
 npm test
 ```
 
-The tests create an isolated `sale_test` database on the local PostgreSQL server. Set `TEST_DATABASE_URL` to use a different test database. They exercise 5,000 concurrent attempts for 100 units, duplicate settlement, simultaneous idempotency keys, and a late charge after cancellation. The expected result is exactly 100 reservations and ultimately 100 sold units; all 4,900 losing attempts receive a stock conflict.
+The tests create an isolated `sale_test` database on the local PostgreSQL server. Set `TEST_DATABASE_URL` to use a different test database. They exercise 5,000 concurrent attempts for 100 units, duplicate settlement, simultaneous idempotency keys, a late charge after cancellation, atomic rollback of a multi-SKU order, and a charge reported after its reservation was released. The expected result of the concurrency case is exactly 100 reservations and ultimately 100 sold units; all 4,900 losing attempts receive a stock conflict.
 
 ## Failure demonstration
 

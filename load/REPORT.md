@@ -4,7 +4,7 @@ Environment: Apple M4 Pro, 24 GiB RAM, arm64, Docker Engine 28.3.2; PostgreSQL 1
 
 ## Concurrent stock test
 
-`npm test` used a separate `sale_test` database. Of 5,000 concurrent application calls for one SKU with 100 units, 100 reserved and 4,900 received a stock conflict. After settling every winning payment twice, the row was `available=0, reserved=0, sold=100`. The application pool allowed at most 20 simultaneous DB connections, so 5,000 calls were outstanding concurrently but not all executing SQL at the same instant.
+`npm test` used a separate `sale_test` database. All four tests passed. Of 5,000 concurrent application calls for one SKU with 100 units, 100 reserved and 4,900 received a stock conflict. After settling every winning payment twice, the row was `available=0, reserved=0, sold=100`. The other cases checked idempotency and late capture after cancellation, full rollback of a multi-SKU reservation, and refund scheduling after a reserve was released. The application pool allowed at most 20 simultaneous DB connections, so 5,000 calls were outstanding concurrently but not all executing SQL at the same instant.
 
 ## 20-second k6 peak
 

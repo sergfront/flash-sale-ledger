@@ -16,7 +16,7 @@ if (!exists.rowCount) await maintenance.query('CREATE DATABASE "' + databaseName
 await maintenance.end();
 process.env.DATABASE_URL = testUrl.toString();
 const { pool } = await import('../src/db.js');
-const { createOrder, cancelOrder, settleCapture } = await import('../src/domain.js');
+const { createOrder, cancelOrder, settleCapture, settleRefund, expireDue } = await import('../src/domain.js');
 await pool.query(await readFile('../../db/schema.sql', 'utf8'));
 
 test('5,000 buyers cannot reserve more than 100 units', { timeout: 120_000 }, async () => {
@@ -56,6 +56,45 @@ test('same idempotency key creates one order; late capture after cancellation sc
   assert.equal(order.rows[0].status, 'REFUND_PENDING');
   const refunds = await pool.query("SELECT count(*)::int AS n FROM payment_operations WHERE order_id=$1 AND kind='REFUND'", [id]);
   assert.equal(refunds.rows[0].n, 1);
+  await pool.query('UPDATE products SET active=false WHERE sku=$1', [sku]);
+});
+
+test('multi-SKU stock failure rolls back the entire reservation', async () => {
+  const prefix = randomUUID().slice(0, 8);
+  const first = 'atomic-a-' + prefix;
+  const second = 'atomic-b-' + prefix;
+  for (const [sku, count] of [[first, 1], [second, 0]] as const) {
+    await pool.query("INSERT INTO products(sku,name,price_cents,active) VALUES($1,'Atomic fixture',100,true)", [sku]);
+    await pool.query('INSERT INTO inventory(sku,total,available,reserved,sold) VALUES($1,$2,$2,0,0)', [sku, count]);
+  }
+  await assert.rejects(
+    createOrder('atomic-buyer', prefix, [{ sku: first, quantity: 1 }, { sku: second, quantity: 1 }]),
+    (error: any) => error.statusCode === 409,
+  );
+  const stock = await pool.query('SELECT sku,available,reserved,sold FROM inventory WHERE sku=ANY($1::text[]) ORDER BY sku', [[first, second]]);
+  assert.deepEqual(stock.rows, [
+    { sku: first, available: 1, reserved: 0, sold: 0 },
+    { sku: second, available: 0, reserved: 0, sold: 0 },
+  ]);
+  await pool.query('UPDATE products SET active=false WHERE sku=ANY($1::text[])', [[first, second]]);
+});
+
+test('capture arriving after reserve release creates a refund, not a sale', async () => {
+  const sku = 'expiry-' + randomUUID().slice(0, 8);
+  await pool.query("INSERT INTO products(sku,name,price_cents,active) VALUES($1,'Expiry fixture',100,true)", [sku]);
+  await pool.query('INSERT INTO inventory(sku,total,available,reserved,sold) VALUES($1,1,1,0,0)', [sku]);
+  const created = await createOrder('expiry-buyer', sku, [{ sku, quantity: 1 }]);
+  const id = created.body.id;
+  await pool.query("UPDATE reservations SET expires_at=clock_timestamp()-interval '1 second' WHERE order_id=$1", [id]);
+  await expireDue();
+  await settleCapture(id, { status: 'SUCCEEDED', occurred_at: new Date(Date.now() - 2000).toISOString() });
+  const stock = await pool.query('SELECT available,reserved,sold FROM inventory WHERE sku=$1', [sku]);
+  assert.deepEqual(stock.rows[0], { available: 1, reserved: 0, sold: 0 });
+  const status = await pool.query('SELECT status FROM orders WHERE id=$1', [id]);
+  assert.equal(status.rows[0].status, 'REFUND_PENDING');
+  await settleRefund(id, { status: 'SUCCEEDED', occurred_at: new Date().toISOString() });
+  const refunded = await pool.query('SELECT status FROM orders WHERE id=$1', [id]);
+  assert.equal(refunded.rows[0].status, 'REFUNDED');
   await pool.query('UPDATE products SET active=false WHERE sku=$1', [sku]);
 });
 
