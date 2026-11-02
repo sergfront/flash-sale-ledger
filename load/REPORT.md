@@ -4,7 +4,7 @@ Environment: Apple M4 Pro, 24 GiB RAM, arm64, Docker Engine 28.3.2; PostgreSQL 1
 
 ## Concurrent stock test
 
-`npm test` used a separate `sale_test` database. All four tests passed. Of 5,000 concurrent application calls for one SKU with 100 units, 100 reserved and 4,900 received a stock conflict. After settling every winning payment twice, the row was `available=0, reserved=0, sold=100`. The other cases checked idempotency and late capture after cancellation, full rollback of a multi-SKU reservation, and refund scheduling after a reserve was released. The application pool allowed at most 20 simultaneous DB connections, so 5,000 calls were outstanding concurrently but not all executing SQL at the same instant.
+`npm test` used a separate `sale_test` database. All four tests passed. Of 5,000 concurrent application calls for one SKU with 100 units, 100 reserved and 4,900 received a stock conflict. After settling every winning payment twice, the row was `available=0, reserved=0, sold=100`. The other cases checked idempotency and late capture after cancellation, full rollback of a multi-SKU reservation, persistent replay of a 409 after restocking, and refund scheduling after a reserve was released. The application pool allowed at most 20 simultaneous DB connections, so 5,000 calls were outstanding concurrently but not all executing SQL at the same instant.
 
 ## 20-second k6 peak
 
@@ -17,26 +17,26 @@ docker run --rm --network flash-sale-platform_default \
   run --summary-export=/scripts/peak-summary.json /scripts/sale.js
 ```
 
-The database was freshly initialized, then seeded with 1,000 load SKUs. The script used 20,000 possible user IDs, 70% catalog reads, 20% checkout attempts and 10% cart reads; 80% of checkouts targeted three hot SKUs. For this shortened run, restocks occurred at 5 and 10 seconds. The full three-minute profile with restocks at 60 and 120 seconds is defined but has not been run.
+The database was freshly initialized, then seeded with 1,000 load SKUs. The script used 20,000 possible user IDs, 70% catalog reads, 20% checkout attempts and 10% cart reads; 80% of checkouts targeted three hot SKUs. For this shortened run, restocks occurred at 5 and 10 seconds. The full three-minute profile with restocks at 60 and 120 seconds is defined but has not been run. Docker Hub metadata lookup stalled during the image rebuild, so the existing local API and worker images were started and the locally compiled `apps/api/dist/domain.js` was copied into each container before restart. The API container module SHA-256 matched the local build (`43b817020a3deb492a06dbe60025bb3cd989480d11723cf03057bc385f125369`). The repository's normal `docker compose up --build -d` path was verified before this code change, but has not been rerun afterward.
 
 | Measurement | Observed |
 | --- | ---: |
-| HTTP requests | 40,008 |
-| Achieved rate | 2,000.12 requests/s |
+| HTTP requests | 40,006 |
+| Achieved rate | 1,999.93 requests/s |
 | Dropped iterations | 0 |
 | HTTP 5xx | 0 |
-| Catalog p95 | 1.14 ms |
-| Checkout p95, including stockouts | 2.45 ms |
-| Cart p95 | 0.48 ms |
-| Stockout responses (409) | 5,368 |
-| Successful checkout responses, including idempotent replays | 2,590 |
-| Unique confirmed orders after drain | 2,374 |
+| Catalog p95 | 1.77 ms |
+| Checkout p95, including stockouts | 6.48 ms |
+| Cart p95 | 1.03 ms |
+| Stockout responses (409) | 5,287 |
+| Successful checkout responses, including idempotent replays | 2,601 |
+| Unique confirmed orders after drain | 2,370 |
 | Pending outbox rows after drain | 0 |
 | Invalid inventory rows | 0 |
 | SKU rows with reservation/sold-counter drift | 0 |
 | Multiple successful capture records for one order | 0 |
 
-The complete k6 export is [peak-summary.json](peak-summary.json). k6 counts 409 stockouts under its generic `http_req_failed` metric; the custom `server_error_rate` excludes them. Only up to five VUs were active at once because responses were very fast. This run demonstrates the configured arrival rate on one local machine, while the separate stock test exercises many concurrent attempts. It does not demonstrate 20,000 simultaneous connections.
+The complete k6 export is [peak-summary.json](peak-summary.json). k6 counts 409 stockouts under its generic `http_req_failed` metric; the custom `server_error_rate` excludes them. Up to 16 VUs were active at once because responses were very fast. This run demonstrates the configured arrival rate on one local machine, while the separate stock test exercises many concurrent attempts. It does not demonstrate 20,000 simultaneous connections.
 
 ## Partial failure
 

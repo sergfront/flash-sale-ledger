@@ -4,6 +4,8 @@ A portfolio implementation of a limited-stock sale. The central rule is simple: 
 
 This is a local demonstration, not a claim about production traffic or a real payment provider.
 
+The detailed Russian [architecture and implementation plan](docs/ARCHITECTURE.md) covers invariants, order states, failure sequences, tradeoffs, API, load targets, and the distributed follow-up.
+
 ## Run
 
 Requires Docker Compose and Node.js 22+.
@@ -36,7 +38,7 @@ Use `docker compose down -v` only when you intentionally want to delete both loc
 {"items":[{"sku":"camera","quantity":1}]}
 ```
 
-One PostgreSQL transaction stores the idempotency result, order snapshot, reservation, stock movement, payment operation, and outbox command. For every SKU, `available >= quantity` is part of the inventory `UPDATE`. Multi-SKU orders update rows in SKU order; any failure rolls back the whole order. The database checks:
+One PostgreSQL transaction stores the idempotency result, order snapshot, reservation, stock movement, payment operation, and outbox command. For every SKU, `available >= quantity` is part of the inventory `UPDATE`. Multi-SKU orders update rows in SKU order. On a stock conflict, a savepoint rolls back every order and inventory write while the transaction commits the 409 response under the idempotency key. Repeating that key returns the same 409 even after a restock; a new purchase attempt needs a new key. Other failures roll back the transaction. The database checks:
 
 ```text
 available >= 0; reserved >= 0; sold >= 0
@@ -72,7 +74,7 @@ npm run build
 npm test
 ```
 
-The tests create an isolated `sale_test` database on the local PostgreSQL server. Set `TEST_DATABASE_URL` to use a different test database. They exercise 5,000 concurrent attempts for 100 units, duplicate settlement, simultaneous idempotency keys, a late charge after cancellation, atomic rollback of a multi-SKU order, and a charge reported after its reservation was released. The expected result of the concurrency case is exactly 100 reservations and ultimately 100 sold units; all 4,900 losing attempts receive a stock conflict.
+The tests create an isolated `sale_test` database on the local PostgreSQL server. Set `TEST_DATABASE_URL` to use a different test database. They exercise 5,000 concurrent attempts for 100 units, duplicate settlement, simultaneous idempotency keys, replay of a stock conflict after restocking, a late charge after cancellation, atomic rollback of a multi-SKU order, and a charge reported after its reservation was released. The expected result of the concurrency case is exactly 100 reservations and ultimately 100 sold units; all 4,900 losing attempts receive a stock conflict.
 
 ## Failure demonstration
 

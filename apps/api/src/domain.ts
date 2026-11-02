@@ -45,43 +45,53 @@ export async function createOrder(userId: string, key: string, input: unknown) {
       if (prior.rows[0].request_hash !== hash) throw new HttpError(409, 'idempotency key reused with different items');
       return { code: prior.rows[0].response_code as number, body: prior.rows[0].response_body };
     }
-    const skus = items.map(i => i.sku);
-    const products = await client.query('SELECT sku,name,price_cents,currency FROM products WHERE active=true AND sku=ANY($1::text[])', [skus]);
-    if (products.rowCount !== items.length) throw new HttpError(400, 'unknown or inactive SKU');
-    const bySku = new Map(products.rows.map(row => [row.sku as string, row]));
-    const currencies = new Set(products.rows.map(row => row.currency));
-    if (currencies.size !== 1) throw new HttpError(400, 'mixed currency order');
-    const amount = items.reduce((sum, i) => sum + bySku.get(i.sku).price_cents * i.quantity, 0);
-    const orderId = randomUUID();
-    await client.query('INSERT INTO orders(id,user_id,status,amount_cents,currency) VALUES($1,$2,$3,$4,$5)',
-      [orderId, userId, 'PENDING_PAYMENT', amount, products.rows[0].currency]);
-    for (const item of items) {
-      const changed = await client.query(
-        'UPDATE inventory SET available=available-$2,reserved=reserved+$2 WHERE sku=$1 AND available >= $2 RETURNING sku',
-        [item.sku, item.quantity],
+    await client.query('SAVEPOINT order_attempt');
+    try {
+      const skus = items.map(i => i.sku);
+      const products = await client.query('SELECT sku,name,price_cents,currency FROM products WHERE active=true AND sku=ANY($1::text[])', [skus]);
+      if (products.rowCount !== items.length) throw new HttpError(400, 'unknown or inactive SKU');
+      const bySku = new Map(products.rows.map(row => [row.sku as string, row]));
+      const currencies = new Set(products.rows.map(row => row.currency));
+      if (currencies.size !== 1) throw new HttpError(400, 'mixed currency order');
+      const amount = items.reduce((sum, i) => sum + bySku.get(i.sku).price_cents * i.quantity, 0);
+      const orderId = randomUUID();
+      await client.query('INSERT INTO orders(id,user_id,status,amount_cents,currency) VALUES($1,$2,$3,$4,$5)',
+        [orderId, userId, 'PENDING_PAYMENT', amount, products.rows[0].currency]);
+      for (const item of items) {
+        const changed = await client.query(
+          'UPDATE inventory SET available=available-$2,reserved=reserved+$2 WHERE sku=$1 AND available >= $2 RETURNING sku',
+          [item.sku, item.quantity],
+        );
+        if (!changed.rowCount) throw new HttpError(409, 'OUT_OF_STOCK:' + item.sku);
+        await movement(client, item.sku, orderId, 'RESERVE', -item.quantity, item.quantity, 0);
+        const product = bySku.get(item.sku);
+        await client.query('INSERT INTO order_items(order_id,sku,name,unit_price_cents,quantity) VALUES($1,$2,$3,$4,$5)',
+          [orderId, item.sku, product.name, product.price_cents, item.quantity]);
+      }
+      const reservation = await client.query(
+        "INSERT INTO reservations(order_id,status,expires_at) VALUES($1,'HELD',clock_timestamp() + interval '5 minutes') RETURNING expires_at",
+        [orderId],
       );
-      if (!changed.rowCount) throw new HttpError(409, 'OUT_OF_STOCK:' + item.sku);
-      await movement(client, item.sku, orderId, 'RESERVE', -item.quantity, item.quantity, 0);
-      const product = bySku.get(item.sku);
-      await client.query('INSERT INTO order_items(order_id,sku,name,unit_price_cents,quantity) VALUES($1,$2,$3,$4,$5)',
-        [orderId, item.sku, product.name, product.price_cents, item.quantity]);
+      for (const item of items) {
+        await client.query('INSERT INTO reservation_items(order_id,sku,quantity) VALUES($1,$2,$3)', [orderId, item.sku, item.quantity]);
+      }
+      await client.query(
+        "INSERT INTO payment_operations(id,order_id,kind,provider_key,amount_cents,status) VALUES($1,$2,'CAPTURE',$3,$4,'QUEUED')",
+        [randomUUID(), orderId, 'capture:' + orderId, amount],
+      );
+      await event(client, 'CAPTURE', orderId);
+      const body = { id: orderId, status: 'PENDING_PAYMENT', amount_cents: amount, currency: products.rows[0].currency, expires_at: reservation.rows[0].expires_at };
+      await client.query('UPDATE idempotency_keys SET order_id=$3,response_code=201,response_body=$4 WHERE user_id=$1 AND key=$2',
+        [userId, key, orderId, JSON.stringify(body)]);
+      return { code: 201, body };
+    } catch (error) {
+      if (!(error instanceof HttpError) || error.statusCode !== 409 || !error.message.startsWith('OUT_OF_STOCK:')) throw error;
+      await client.query('ROLLBACK TO SAVEPOINT order_attempt');
+      const body = { error: error.message };
+      await client.query('UPDATE idempotency_keys SET response_code=409,response_body=$3 WHERE user_id=$1 AND key=$2',
+        [userId, key, JSON.stringify(body)]);
+      return { code: 409, body };
     }
-    const reservation = await client.query(
-      "INSERT INTO reservations(order_id,status,expires_at) VALUES($1,'HELD',clock_timestamp() + interval '5 minutes') RETURNING expires_at",
-      [orderId],
-    );
-    for (const item of items) {
-      await client.query('INSERT INTO reservation_items(order_id,sku,quantity) VALUES($1,$2,$3)', [orderId, item.sku, item.quantity]);
-    }
-    await client.query(
-      "INSERT INTO payment_operations(id,order_id,kind,provider_key,amount_cents,status) VALUES($1,$2,'CAPTURE',$3,$4,'QUEUED')",
-      [randomUUID(), orderId, 'capture:' + orderId, amount],
-    );
-    await event(client, 'CAPTURE', orderId);
-    const body = { id: orderId, status: 'PENDING_PAYMENT', amount_cents: amount, currency: products.rows[0].currency, expires_at: reservation.rows[0].expires_at };
-    await client.query('UPDATE idempotency_keys SET order_id=$3,response_code=201,response_body=$4 WHERE user_id=$1 AND key=$2',
-      [userId, key, orderId, JSON.stringify(body)]);
-    return { code: 201, body };
   });
 }
 

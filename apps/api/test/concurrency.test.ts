@@ -21,15 +21,16 @@ await pool.query(await readFile('../../db/schema.sql', 'utf8'));
 
 test('5,000 buyers cannot reserve more than 100 units', { timeout: 120_000 }, async () => {
   const sku = 'race-' + randomUUID().slice(0, 8);
+  const runId = randomUUID().slice(0, 8);
   await pool.query("INSERT INTO products(sku,name,price_cents,active) VALUES($1,'Race fixture',100,true)", [sku]);
   await pool.query('INSERT INTO inventory(sku,total,available,reserved,sold) VALUES($1,100,100,0,0)', [sku]);
-  const attempts = await Promise.allSettled(Array.from({ length: 5000 }, (_, n) =>
-    createOrder('buyer-' + n, 'attempt-' + n, [{ sku, quantity: 1 }])));
-  const winners = attempts.filter(result => result.status === 'fulfilled').map(result => (result as PromiseFulfilledResult<any>).value.body.id as string);
-  const losers = attempts.filter(result => result.status === 'rejected');
+  const attempts = await Promise.all(Array.from({ length: 5000 }, (_, n) =>
+    createOrder('buyer-' + runId + '-' + n, 'attempt-' + runId + '-' + n, [{ sku, quantity: 1 }])));
+  const winners = attempts.filter(result => result.code === 201).map(result => result.body.id as string);
+  const losers = attempts.filter(result => result.code === 409);
   assert.equal(winners.length, 100);
   assert.equal(losers.length, 4900);
-  assert.ok(losers.every(result => (result as PromiseRejectedResult).reason.statusCode === 409));
+  assert.ok(losers.every(result => result.body.error === 'OUT_OF_STOCK:' + sku));
   const held = await pool.query('SELECT available,reserved,sold,total FROM inventory WHERE sku=$1', [sku]);
   assert.deepEqual(held.rows[0], { available: 0, reserved: 100, sold: 0, total: 100 });
   const capturedAt = new Date().toISOString();
@@ -67,15 +68,18 @@ test('multi-SKU stock failure rolls back the entire reservation', async () => {
     await pool.query("INSERT INTO products(sku,name,price_cents,active) VALUES($1,'Atomic fixture',100,true)", [sku]);
     await pool.query('INSERT INTO inventory(sku,total,available,reserved,sold) VALUES($1,$2,$2,0,0)', [sku, count]);
   }
-  await assert.rejects(
-    createOrder('atomic-buyer', prefix, [{ sku: first, quantity: 1 }, { sku: second, quantity: 1 }]),
-    (error: any) => error.statusCode === 409,
-  );
+  const failed = await createOrder('atomic-buyer', prefix, [{ sku: first, quantity: 1 }, { sku: second, quantity: 1 }]);
+  assert.equal(failed.code, 409);
   const stock = await pool.query('SELECT sku,available,reserved,sold FROM inventory WHERE sku=ANY($1::text[]) ORDER BY sku', [[first, second]]);
   assert.deepEqual(stock.rows, [
     { sku: first, available: 1, reserved: 0, sold: 0 },
     { sku: second, available: 0, reserved: 0, sold: 0 },
   ]);
+  await pool.query('UPDATE inventory SET total=1,available=1 WHERE sku=$1', [second]);
+  const replay = await createOrder('atomic-buyer', prefix, [{ sku: first, quantity: 1 }, { sku: second, quantity: 1 }]);
+  assert.deepEqual(replay, failed);
+  const fresh = await createOrder('atomic-buyer', prefix + '-new', [{ sku: first, quantity: 1 }, { sku: second, quantity: 1 }]);
+  assert.equal(fresh.code, 201);
   await pool.query('UPDATE products SET active=false WHERE sku=ANY($1::text[])', [[first, second]]);
 });
 
