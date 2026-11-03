@@ -95,7 +95,7 @@ stateDiagram-v2
 | `GET /orders/:id` | Состояние, позиции, резерв и платёжные операции владельца |
 | `POST /orders/:id/cancel` | Идемпотентная отмена или начало возврата по ключу запроса |
 | `POST /payment-webhooks/simulator` | Подписанное событие симулятора |
-| `POST /internal/settle` | Применение результата сверки через общую машину состояний |
+| `POST /internal/settle` | Применение результата сверки через общую машину состояний; отдельный `x-reconciler-token` |
 | `GET /operator/inventory`, `POST /operator/inventory/:sku/adjust` | Проверка и изменение доступного остатка |
 | `GET /operator/reconciliation`, `POST /operator/orders/:id/refund` | Разбор исключений и возврат |
 | `POST /operator/orders/:id/refund/retry` | Новая попытка неуспешного возврата с новым ключом провайдера |

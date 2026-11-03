@@ -2,6 +2,7 @@ import { pool, transaction } from './db.js';
 import { beginPayment, expireDue, settleCapture, settleRefund } from './domain.js';
 
 const paymentUrl = process.env.PAYMENT_URL ?? 'http://localhost:3001';
+const paymentToken = process.env.PAYMENT_INTERNAL_TOKEN ?? 'local-payment-token';
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 async function claim() {
@@ -35,7 +36,7 @@ async function processOne(row: { id: string; kind: string; aggregate_id: string 
   };
   const response = await fetch(paymentUrl + (row.kind === 'CAPTURE' ? '/capture' : '/refund'), {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    headers: { 'content-type': 'application/json', 'x-payment-token': paymentToken },
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(5000),
   });

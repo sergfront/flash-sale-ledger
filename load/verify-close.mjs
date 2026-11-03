@@ -7,7 +7,7 @@ const count = Number(process.env.RACES ?? 100);
 async function post(path, body, extra = {}) {
   const response = await fetch(api + path, {
     method: 'POST',
-    headers: { 'content-type': 'application/json', ...extra },
+    headers: { 'content-type': 'application/json', 'x-payment-token': token, ...extra },
     body: JSON.stringify(body),
   });
   if (response.status !== 200) throw new Error(`${response.status}: ${await response.text()}`);

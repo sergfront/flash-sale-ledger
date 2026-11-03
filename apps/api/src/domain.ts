@@ -3,7 +3,7 @@ import type { PoolClient } from 'pg';
 import { HttpError, pool, transaction } from './db.js';
 
 type Item = { sku: string; quantity: number };
-type PaymentResult = { status: 'SUCCEEDED' | 'FAILED' | 'UNKNOWN'; occurred_at?: string; provider_key?: string };
+type PaymentResult = { status: 'SUCCEEDED' | 'FAILED' | 'UNKNOWN'; occurred_at?: string; provider_key?: string; amount_cents?: number };
 
 function itemsFrom(input: unknown): Item[] {
   if (!Array.isArray(input) || input.length === 0 || input.length > 10) throw new HttpError(400, 'items must contain 1–10 SKUs');
@@ -130,6 +130,8 @@ export async function settleCapture(orderId: string, result: PaymentResult, even
     const order = orderResult.rows[0];
     const opResult = await client.query("SELECT * FROM payment_operations WHERE order_id=$1 AND kind='CAPTURE' FOR UPDATE", [orderId]);
     const op = opResult.rows[0];
+    if ((result.provider_key && result.provider_key !== op.provider_key) ||
+        (result.amount_cents !== undefined && result.amount_cents !== op.amount_cents)) throw new HttpError(409, 'payment result does not match capture');
     if (result.status !== 'UNKNOWN') await client.query("UPDATE reconciliation_cases SET resolved_at=clock_timestamp() WHERE order_id=$1 AND kind='PAYMENT_NOT_FOUND' AND resolved_at IS NULL", [orderId]);
     if (op.status === 'SUCCEEDED' && ['CONFIRMED','REFUND_PENDING','REFUNDED'].includes(order.status)) return { status: order.status };
     if (result.status === 'UNKNOWN') {
@@ -175,9 +177,10 @@ export async function settleRefund(orderId: string, result: PaymentResult, event
     }
     const order = await client.query('SELECT status FROM orders WHERE id=$1 FOR UPDATE', [orderId]);
     if (!order.rowCount) throw new HttpError(404, 'order not found');
-    const prior = await client.query("SELECT id,status,provider_key FROM payment_operations WHERE order_id=$1 AND kind='REFUND' ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE", [orderId]);
+    const prior = await client.query("SELECT id,status,provider_key,amount_cents FROM payment_operations WHERE order_id=$1 AND kind='REFUND' ORDER BY created_at DESC,id DESC LIMIT 1 FOR UPDATE", [orderId]);
     if (!prior.rowCount) throw new HttpError(404, 'refund not found');
     if (result.provider_key && result.provider_key !== prior.rows[0].provider_key) return { stale: true };
+    if (result.amount_cents !== undefined && result.amount_cents !== prior.rows[0].amount_cents) throw new HttpError(409, 'payment result does not match refund');
     if (prior.rows[0].status === 'SUCCEEDED' && order.rows[0].status === 'REFUNDED') return { status: 'REFUNDED' };
     const status = result.status === 'SUCCEEDED' ? 'SUCCEEDED' : result.status === 'FAILED' ? 'FAILED' : 'UNKNOWN';
     await client.query("UPDATE payment_operations SET status=$2,occurred_at=COALESCE($3,occurred_at) WHERE id=$1",

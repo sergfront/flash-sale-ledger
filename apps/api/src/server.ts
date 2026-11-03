@@ -30,6 +30,9 @@ function userId(headers: Record<string, unknown>) {
 function operator(headers: Record<string, unknown>) {
   if (headers['x-operator-token'] !== (process.env.OPERATOR_TOKEN ?? 'local-operator-token')) throw new HttpError(403, 'operator token required');
 }
+function reconciler(headers: Record<string, unknown>) {
+  if (headers['x-reconciler-token'] !== (process.env.RECONCILER_TOKEN ?? 'local-reconciler-token')) throw new HttpError(403, 'reconciler token required');
+}
 function key(headers: Record<string, unknown>) {
   return typeof headers['idempotency-key'] === 'string' ? headers['idempotency-key'] : '';
 }
@@ -103,7 +106,7 @@ app.post<{ Params: { id: string } }>('/orders/:id/cancel', async (request) => {
   return cancelOrder(request.params.id, userId(request.headers), key(request.headers));
 });
 
-app.post<{ Body: { event_id: string; order_id: string; kind: 'CAPTURE' | 'REFUND'; status: 'SUCCEEDED' | 'FAILED'; occurred_at: string } }>(
+app.post<{ Body: { event_id: string; order_id: string; kind: 'CAPTURE' | 'REFUND'; status: 'SUCCEEDED' | 'FAILED'; occurred_at: string; provider_key: string; amount_cents: number } }>(
   '/payment-webhooks/simulator',
   async (request) => {
     const signature = request.headers['x-simulator-signature'];
@@ -112,7 +115,8 @@ app.post<{ Body: { event_id: string; order_id: string; kind: 'CAPTURE' | 'REFUND
     if (typeof signature !== 'string' || signature.length !== expected.length ||
         !timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) throw new HttpError(401, 'invalid signature');
     const body = request.body;
-    if (!body?.event_id || !body?.order_id || !['CAPTURE','REFUND'].includes(body.kind) || !['SUCCEEDED','FAILED'].includes(body.status)) {
+    if (!body?.event_id || !body?.order_id || !['CAPTURE','REFUND'].includes(body.kind) || !['SUCCEEDED','FAILED'].includes(body.status) ||
+        typeof body.provider_key !== 'string' || !Number.isInteger(body.amount_cents) || body.amount_cents < 0) {
       throw new HttpError(400, 'invalid event');
     }
     return body.kind === 'CAPTURE'
@@ -121,12 +125,13 @@ app.post<{ Body: { event_id: string; order_id: string; kind: 'CAPTURE' | 'REFUND
   },
 );
 
-app.post<{ Body: { order_id: string; kind: 'CAPTURE' | 'REFUND'; status: 'SUCCEEDED' | 'FAILED' | 'UNKNOWN'; occurred_at?: string } }>(
+app.post<{ Body: { order_id: string; kind: 'CAPTURE' | 'REFUND'; status: 'SUCCEEDED' | 'FAILED' | 'UNKNOWN'; occurred_at?: string; provider_key: string; amount_cents: number } }>(
   '/internal/settle',
   async (request) => {
-    operator(request.headers);
+    reconciler(request.headers);
     const body = request.body;
-    if (!body?.order_id || !['CAPTURE','REFUND'].includes(body.kind) || !['SUCCEEDED','FAILED','UNKNOWN'].includes(body.status)) {
+    if (!body?.order_id || !['CAPTURE','REFUND'].includes(body.kind) || !['SUCCEEDED','FAILED','UNKNOWN'].includes(body.status) ||
+        typeof body.provider_key !== 'string' || !Number.isInteger(body.amount_cents) || body.amount_cents < 0) {
       throw new HttpError(400, 'invalid settlement');
     }
     return body.kind === 'CAPTURE' ? settleCapture(body.order_id, body) : settleRefund(body.order_id, body);

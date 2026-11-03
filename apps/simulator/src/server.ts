@@ -9,6 +9,7 @@ await pool.query(await readFile('db/simulator.sql', 'utf8'));
 
 type Request = { order_id: string; provider_key: string; amount_cents: number; expires_at?: string; original_key?: string };
 const fraction = (key: string) => createHash('sha256').update(key).digest().readUInt32BE(0) / 0xffffffff;
+const paymentToken = process.env.PAYMENT_INTERNAL_TOKEN ?? 'local-payment-token';
 
 async function webhook(body: object, key: string) {
   const dropRate = Number(process.env.SIM_DROP_WEBHOOK_RATE ?? 0);
@@ -22,9 +23,13 @@ async function webhook(body: object, key: string) {
   }
 }
 
-async function operation(kind: 'CAPTURE' | 'REFUND', body: Request, reply: any) {
+async function operation(kind: 'CAPTURE' | 'REFUND', body: Request, reply: any, token: unknown) {
+  if (token !== paymentToken) return reply.code(403).send({ error: 'payment token required' });
   if (!body || typeof body.order_id !== 'string' || typeof body.provider_key !== 'string' ||
-      !Number.isInteger(body.amount_cents) || body.amount_cents < 0) {
+      !Number.isInteger(body.amount_cents) || body.amount_cents < 0 ||
+      (kind === 'CAPTURE' && body.provider_key !== 'capture:' + body.order_id) ||
+      (kind === 'REFUND' && !(body.provider_key === 'refund:' + body.order_id || body.provider_key.startsWith('refund:' + body.order_id + ':'))) ||
+      (kind === 'REFUND' && body.original_key !== 'capture:' + body.order_id)) {
     return reply.code(400).send({ error: 'invalid payment request' });
   }
   const failRate = Number(process.env.SIM_FAIL_RATE ?? 0);
@@ -44,7 +49,7 @@ async function operation(kind: 'CAPTURE' | 'REFUND', body: Request, reply: any) 
   if (stored.kind !== kind || stored.order_id !== body.order_id || stored.amount_cents !== body.amount_cents) {
     return reply.code(409).send({ error: 'payment key reused with different request' });
   }
-  const result = { order_id: body.order_id, kind, provider_key: body.provider_key, status: stored.status, occurred_at: stored.occurred_at };
+  const result = { order_id: body.order_id, kind, provider_key: body.provider_key, amount_cents: stored.amount_cents, status: stored.status, occurred_at: stored.occurred_at };
   const event = { ...result, event_id: 'evt:' + createHash('sha256').update(body.provider_key).digest('hex').slice(0, 32) };
   void webhook(event, body.provider_key);
   if (fraction('timeout:' + body.provider_key) < Number(process.env.SIM_TIMEOUT_AFTER_COMMIT_RATE ?? 0)) {
@@ -53,10 +58,10 @@ async function operation(kind: 'CAPTURE' | 'REFUND', body: Request, reply: any) 
   return result;
 }
 
-app.post<{ Body: Request }>('/capture', (request, reply) => operation('CAPTURE', request.body, reply));
-app.post<{ Body: Request }>('/refund', (request, reply) => operation('REFUND', request.body, reply));
+app.post<{ Body: Request }>('/capture', (request, reply) => operation('CAPTURE', request.body, reply, request.headers['x-payment-token']));
+app.post<{ Body: Request }>('/refund', (request, reply) => operation('REFUND', request.body, reply, request.headers['x-payment-token']));
 app.post<{ Params: { key: string }; Body: { order_id: string; amount_cents: number } }>('/operations/:key/close', async (request, reply) => {
-  if (request.headers['x-payment-token'] !== (process.env.PAYMENT_INTERNAL_TOKEN ?? 'local-payment-token')) {
+  if (request.headers['x-payment-token'] !== paymentToken) {
     return reply.code(403).send({ error: 'payment token required' });
   }
   const { key } = request.params;
@@ -76,6 +81,7 @@ app.post<{ Params: { key: string }; Body: { order_id: string; amount_cents: numb
   return stored;
 });
 app.get<{ Params: { key: string } }>('/operations/:key', async (request, reply) => {
+  if (request.headers['x-payment-token'] !== paymentToken) return reply.code(403).send({ error: 'payment token required' });
   const result = await pool.query('SELECT provider_key,kind,order_id,amount_cents,status,occurred_at FROM payment_ledger WHERE provider_key=$1', [request.params.key]);
   if (!result.rowCount) return reply.code(404).send({ error: 'operation not found' });
   return result.rows[0];

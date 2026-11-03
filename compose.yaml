@@ -53,6 +53,7 @@ services:
       PAYMENT_URL: http://simulator:3001
       WEBHOOK_SECRET: local-demo-secret
       OPERATOR_TOKEN: local-operator-token
+      RECONCILER_TOKEN: local-reconciler-token
       API_PORT: 3000
     ports: ["3003:3000"]
     depends_on:
@@ -67,6 +68,7 @@ services:
     environment:
       DATABASE_URL: postgres://sale:sale@db:5432/sale
       PAYMENT_URL: http://simulator:3001
+      PAYMENT_INTERNAL_TOKEN: local-payment-token
     depends_on:
       api: { condition: service_started }
   reconciler:
@@ -77,7 +79,7 @@ services:
       DATABASE_URL: postgres://sale:sale@db:5432/sale
       PAYMENT_URL: http://simulator:3001
       API_URL: http://api:3000
-      OPERATOR_TOKEN: local-operator-token
+      RECONCILER_TOKEN: local-reconciler-token
       PAYMENT_INTERNAL_TOKEN: local-payment-token
     depends_on:
       api: { condition: service_started }

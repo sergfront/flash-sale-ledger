@@ -22,6 +22,7 @@ curl http://localhost:3003/health
 - Local operator token: `local-operator-token`
 
 The UI uses a generated `x-user-id` for demo identity. The operator view asks for the local token. Neither mechanism is production authentication.
+The simulator requires `x-payment-token` on capture, refund, close, and ledger lookup. The API's internal settlement route requires a separate `x-reconciler-token`; signed webhooks are also checked against the order's provider key and amount. Compose supplies local demonstration values, which must be replaced outside a local environment.
 
 ```sh
 docker compose logs -f api worker simulator reconciler
@@ -65,7 +66,7 @@ The queue is PostgreSQL outbox polling. RabbitMQ is a documented next stage for 
 | `GET /operator/reconciliation`, `POST /operator/orders/:id/refund` | Exception handling |
 | `POST /operator/orders/:id/refund/retry` | Retry a failed refund with a fresh provider key |
 
-Customer routes require `x-user-id`; order creation and cancellation also require `Idempotency-Key`. Operator routes require `x-operator-token`. The internal settlement route is intended only for the reconciler.
+Customer routes require `x-user-id`; order creation and cancellation also require `Idempotency-Key`. Operator routes require `x-operator-token`. The internal settlement route requires `x-reconciler-token`.
 
 ## Tests
 
@@ -75,7 +76,7 @@ npm run build
 npm test
 ```
 
-The tests create an isolated `sale_test` database on the local PostgreSQL server. Set `TEST_DATABASE_URL` to use a different test database. They exercise 5,000 concurrent attempts for 100 units, duplicate settlement, simultaneous idempotency keys, replay of a stock conflict after restocking, a late charge after cancellation, atomic rollback of a multi-SKU order, a charge reported after its reservation was released, and a failed refund retried with a new provider key. The expected result of the concurrency case is exactly 100 reservations and ultimately 100 sold units; all 4,900 losing attempts receive a stock conflict.
+The tests create an isolated `sale_test` database on the local PostgreSQL server. Set `TEST_DATABASE_URL` to use a different test database. They exercise 5,000 concurrent attempts for 100 units, duplicate settlement, simultaneous idempotency keys, replay of a stock conflict after restocking, a late charge after cancellation, atomic rollback of a multi-SKU order, a charge reported after its reservation was released, a failed refund retried with a new provider key, and rejection of a payment result with the wrong key or amount. The expected result of the concurrency case is exactly 100 reservations and ultimately 100 sold units; all 4,900 losing attempts receive a stock conflict.
 
 With the simulator running, `node load/verify-close.mjs` checks 100 concurrent capture/close races against its durable ledger.
 
@@ -121,6 +122,6 @@ An empty result is necessary but not sufficient: compare `reserved` with held re
 
 ## Honest portfolio claim
 
-The committed [load report](load/REPORT.md) contains fresh 20-second and three-minute runs of this revision, with raw k6 exports and the local machine specification. These are local measurements, not production traffic.
+The committed [load report](load/REPORT.md) contains 20-second and three-minute runs from the measured revision, with raw k6 exports and the local machine specification. Later service-token and payment-result validation changes passed the current build and tests, but those load numbers were not remeasured. These are local measurements, not production traffic.
 
 The repository can substantiate the schema, state transitions, fault reproduction, concurrent test results, and any committed load report. It cannot substantiate real customer traffic or a production provider. State measured throughput and latency only after running the script on a recorded machine.

@@ -115,7 +115,9 @@ test('failed refund can be retried with a new provider key; stale event cannot s
   const retried = await retryRefund(id);
   assert.notEqual(retried.provider_key, 'refund:' + id);
   assert.deepEqual(await settleRefund(id, { status: 'FAILED', provider_key: 'refund:' + id }), { stale: true });
-  await settleRefund(id, { status: 'SUCCEEDED', provider_key: retried.provider_key, occurred_at: new Date().toISOString() });
+  await assert.rejects(settleRefund(id, { status: 'SUCCEEDED', provider_key: retried.provider_key, amount_cents: 1, occurred_at: new Date().toISOString() }),
+    (error: any) => error.statusCode === 409);
+  await settleRefund(id, { status: 'SUCCEEDED', provider_key: retried.provider_key, amount_cents: 100, occurred_at: new Date().toISOString() });
   const replay = await cancelOrder(id, 'refund-buyer', 'cancel-' + sku);
   assert.deepEqual(replay, firstCancel);
   const order = await pool.query('SELECT status FROM orders WHERE id=$1', [id]);
@@ -140,6 +142,24 @@ test('API process clock skew does not expire a new reservation', async () => {
   }
   const reservation = await pool.query('SELECT status FROM reservations WHERE order_id=$1', [created.body.id]);
   assert.equal(reservation.rows[0].status, 'HELD');
+  await pool.query('UPDATE products SET active=false WHERE sku=$1', [sku]);
+});
+
+test('payment result must match the order capture key and amount', async () => {
+  const sku = 'payment-match-' + randomUUID().slice(0, 8);
+  await pool.query("INSERT INTO products(sku,name,price_cents,active) VALUES($1,'Payment fixture',125,true)", [sku]);
+  await pool.query('INSERT INTO inventory(sku,total,available,reserved,sold) VALUES($1,1,1,0,0)', [sku]);
+  const created = await createOrder('payment-buyer', sku, [{ sku, quantity: 1 }]);
+  const id = created.body.id;
+  const occurred_at = new Date().toISOString();
+  await assert.rejects(settleCapture(id, { status: 'SUCCEEDED', provider_key: 'capture:' + randomUUID(), amount_cents: 125, occurred_at }),
+    (error: any) => error.statusCode === 409);
+  await assert.rejects(settleCapture(id, { status: 'SUCCEEDED', provider_key: 'capture:' + id, amount_cents: 1, occurred_at }),
+    (error: any) => error.statusCode === 409);
+  const stock = await pool.query('SELECT available,reserved,sold FROM inventory WHERE sku=$1', [sku]);
+  assert.deepEqual(stock.rows[0], { available: 0, reserved: 1, sold: 0 });
+  const settled = await settleCapture(id, { status: 'SUCCEEDED', provider_key: 'capture:' + id, amount_cents: 125, occurred_at });
+  assert.deepEqual(settled, { status: 'CONFIRMED' });
   await pool.query('UPDATE products SET active=false WHERE sku=$1', [sku]);
 });
 

@@ -10,7 +10,7 @@ import psycopg
 DATABASE_URL = os.getenv("DATABASE_URL", "postgres://sale:sale@localhost:5432/sale")
 PAYMENT_URL = os.getenv("PAYMENT_URL", "http://localhost:3001")
 API_URL = os.getenv("API_URL", "http://localhost:3000")
-TOKEN = os.getenv("OPERATOR_TOKEN", "local-operator-token")
+TOKEN = os.getenv("RECONCILER_TOKEN", "local-reconciler-token")
 PAYMENT_TOKEN = os.getenv("PAYMENT_INTERNAL_TOKEN", "local-payment-token")
 
 
@@ -59,7 +59,7 @@ def reconcile_once(conn, http):
         if kind == "CAPTURE" and order_status == "REFUND_PENDING":
             continue
         try:
-            response = http.get(PAYMENT_URL + "/operations/" + provider_key)
+            response = http.get(PAYMENT_URL + "/operations/" + provider_key, headers={"x-payment-token": PAYMENT_TOKEN})
             if response.status_code == 404:
                 if kind == "CAPTURE" and close_due:
                     response = http.post(
@@ -77,10 +77,11 @@ def reconcile_once(conn, http):
                 "status": payment["status"],
                 "occurred_at": payment["occurred_at"],
                 "provider_key": provider_key,
+                "amount_cents": payment["amount_cents"],
             }
             settled = http.post(
                 API_URL + "/internal/settle",
-                headers={"x-operator-token": TOKEN},
+                headers={"x-reconciler-token": TOKEN},
                 json=result,
             )
             settled.raise_for_status()
