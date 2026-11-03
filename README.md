@@ -1,4 +1,4 @@
-# DROP / LAB — flash sale platform
+# DROP / LAB — Flash Sale Ledger
 
 A portfolio implementation of a limited-stock sale. The central rule is simple: **a SKU cannot have more reserved and sold units than its recorded total**. The repository contains a React store and operator view, a Node.js/TypeScript order API and worker, a separate durable payment simulator, and a Python reconciliation process.
 
@@ -105,7 +105,7 @@ Use fresh demo volumes if you want the load seed to start from its documented st
 
 ```sh
 docker compose exec -T api npm run seed:load -w apps/api
-docker run --rm --network flash-sale-platform_default \
+docker run --rm --network flash-sale-ledger_default \
   -v "$PWD/load:/scripts" \
   grafana/k6 run --summary-export=/scripts/summary.json /scripts/sale.js
 ```

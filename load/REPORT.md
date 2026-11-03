@@ -8,10 +8,10 @@ Environment: Apple M4 Pro, 24 GiB RAM, arm64, Docker Engine 28.3.2; PostgreSQL 1
 
 ## k6 results
 
-The complete three-minute command was:
+The complete three-minute command, adapted to the repository's current folder name, is:
 
 ```sh
-docker run --rm --network flash-sale-platform_default \
+docker run --rm --network flash-sale-ledger_default \
   -e RATE=2000 -e DURATION=3m -e RESTOCK_INTERVAL=60 \
   -v "$PWD/load:/scripts" grafana/k6 \
   run --summary-export=/scripts/full-summary.json /scripts/sale.js

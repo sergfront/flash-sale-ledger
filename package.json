@@ -1,5 +1,5 @@
 {
-  "name": "flash-sale-platform",
+  "name": "flash-sale-ledger",
   "private": true,
   "workspaces": ["apps/api", "apps/simulator", "apps/web"],
   "scripts": {
