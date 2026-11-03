@@ -35,17 +35,38 @@ async function operation(kind: 'CAPTURE' | 'REFUND', body: Request, reply: any, 
   const failRate = Number(process.env.SIM_FAIL_RATE ?? 0);
   const expired = kind === 'CAPTURE' && (!body.expires_at || Date.parse(body.expires_at) <= Date.now());
   const failed = expired || fraction('fail:' + body.provider_key) < failRate;
-  if (kind === 'REFUND') {
-    const original = await pool.query("SELECT * FROM payment_ledger WHERE provider_key=$1 AND kind='CAPTURE'", [body.original_key]);
-    if (!original.rowCount || original.rows[0].status !== 'SUCCEEDED' || original.rows[0].amount_cents < body.amount_cents) {
-      return reply.code(409).send({ error: 'capture missing or refund exceeds captured amount' });
+  const client = await pool.connect();
+  let stored;
+  try {
+    await client.query('BEGIN');
+    if (kind === 'REFUND') {
+      // Lock the capture so different refund keys serialize before checking the total.
+      const original = await client.query("SELECT * FROM payment_ledger WHERE provider_key=$1 AND kind='CAPTURE' FOR UPDATE", [body.original_key]);
+      if (!original.rowCount || original.rows[0].status !== 'SUCCEEDED') {
+        await client.query('ROLLBACK');
+        return reply.code(409).send({ error: 'successful capture missing' });
+      }
+      const prior = await client.query('SELECT * FROM payment_ledger WHERE provider_key=$1', [body.provider_key]);
+      if (!prior.rowCount && !failed) {
+        const refunded = await client.query("SELECT COALESCE(sum(amount_cents),0)::bigint AS amount FROM payment_ledger WHERE original_key=$1 AND kind='REFUND' AND status='SUCCEEDED'", [body.original_key]);
+        if (BigInt(refunded.rows[0].amount) + BigInt(body.amount_cents) > BigInt(original.rows[0].amount_cents)) {
+          await client.query('ROLLBACK');
+          return reply.code(409).send({ error: 'refund exceeds captured amount' });
+        }
+      }
     }
+    await client.query(
+      'INSERT INTO payment_ledger(provider_key,kind,order_id,amount_cents,status,original_key) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(provider_key) DO NOTHING',
+      [body.provider_key, kind, body.order_id, body.amount_cents, failed ? 'FAILED' : 'SUCCEEDED', body.original_key ?? null],
+    );
+    stored = (await client.query('SELECT * FROM payment_ledger WHERE provider_key=$1', [body.provider_key])).rows[0];
+    await client.query('COMMIT');
+  } catch (error) {
+    await client.query('ROLLBACK');
+    throw error;
+  } finally {
+    client.release();
   }
-  await pool.query(
-    'INSERT INTO payment_ledger(provider_key,kind,order_id,amount_cents,status,original_key) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(provider_key) DO NOTHING',
-    [body.provider_key, kind, body.order_id, body.amount_cents, failed ? 'FAILED' : 'SUCCEEDED', body.original_key ?? null],
-  );
-  const stored = (await pool.query('SELECT * FROM payment_ledger WHERE provider_key=$1', [body.provider_key])).rows[0];
   if (stored.kind !== kind || stored.order_id !== body.order_id || stored.amount_cents !== body.amount_cents) {
     return reply.code(409).send({ error: 'payment key reused with different request' });
   }

@@ -45,9 +45,12 @@ async function processOne(row: { id: string; kind: string; aggregate_id: string 
     throw new Error('provider timeout after possible commit');
   }
   if (!response.ok) throw new Error('payment service returned ' + response.status);
-  const result = await response.json() as { status: 'SUCCEEDED' | 'FAILED'; occurred_at: string };
+  const result = await response.json() as { status: 'SUCCEEDED' | 'FAILED'; occurred_at: string; provider_key: string; amount_cents: number };
+  if (result.provider_key !== op.provider_key || result.amount_cents !== op.amount_cents) {
+    throw new Error('payment response does not match requested operation');
+  }
   if (row.kind === 'CAPTURE') await settleCapture(orderId, result);
-  else await settleRefund(orderId, { ...result, provider_key: op.provider_key });
+  else await settleRefund(orderId, result);
   await pool.query("UPDATE outbox SET status='DONE',lease_until=NULL WHERE id=$1", [row.id]);
 }
 

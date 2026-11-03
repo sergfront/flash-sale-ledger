@@ -79,6 +79,7 @@ npm test
 The tests create an isolated `sale_test` database on the local PostgreSQL server. Set `TEST_DATABASE_URL` to use a different test database. They exercise 5,000 concurrent attempts for 100 units, duplicate settlement, simultaneous idempotency keys, replay of a stock conflict after restocking, a late charge after cancellation, atomic rollback of a multi-SKU order, a charge reported after its reservation was released, a failed refund retried with a new provider key, and rejection of a payment result with the wrong key or amount. The expected result of the concurrency case is exactly 100 reservations and ultimately 100 sold units; all 4,900 losing attempts receive a stock conflict.
 
 With the simulator running, `node load/verify-close.mjs` checks 100 concurrent capture/close races against its durable ledger.
+`node load/verify-refund.mjs` sends 20 simultaneous full-refund requests with distinct keys. Exactly one may succeed; repeating its key returns the same result.
 
 ## Failure demonstration
 
