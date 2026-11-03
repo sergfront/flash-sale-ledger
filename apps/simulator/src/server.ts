@@ -55,6 +55,26 @@ async function operation(kind: 'CAPTURE' | 'REFUND', body: Request, reply: any) 
 
 app.post<{ Body: Request }>('/capture', (request, reply) => operation('CAPTURE', request.body, reply));
 app.post<{ Body: Request }>('/refund', (request, reply) => operation('REFUND', request.body, reply));
+app.post<{ Params: { key: string }; Body: { order_id: string; amount_cents: number } }>('/operations/:key/close', async (request, reply) => {
+  if (request.headers['x-payment-token'] !== (process.env.PAYMENT_INTERNAL_TOKEN ?? 'local-payment-token')) {
+    return reply.code(403).send({ error: 'payment token required' });
+  }
+  const { key } = request.params;
+  const { order_id, amount_cents } = request.body ?? {};
+  if (!key.startsWith('capture:') || typeof order_id !== 'string' || key !== 'capture:' + order_id ||
+      !Number.isInteger(amount_cents) || amount_cents < 0) {
+    return reply.code(400).send({ error: 'invalid close request' });
+  }
+  await pool.query(
+    "INSERT INTO payment_ledger(provider_key,kind,order_id,amount_cents,status) VALUES($1,'CAPTURE',$2,$3,'FAILED') ON CONFLICT(provider_key) DO NOTHING",
+    [key, order_id, amount_cents],
+  );
+  const stored = (await pool.query('SELECT provider_key,kind,order_id,amount_cents,status,occurred_at FROM payment_ledger WHERE provider_key=$1', [key])).rows[0];
+  if (stored.kind !== 'CAPTURE' || stored.order_id !== order_id || stored.amount_cents !== amount_cents) {
+    return reply.code(409).send({ error: 'payment key reused with different request' });
+  }
+  return stored;
+});
 app.get<{ Params: { key: string } }>('/operations/:key', async (request, reply) => {
   const result = await pool.query('SELECT provider_key,kind,order_id,amount_cents,status,occurred_at FROM payment_ledger WHERE provider_key=$1', [request.params.key]);
   if (!result.rowCount) return reply.code(404).send({ error: 'operation not found' });

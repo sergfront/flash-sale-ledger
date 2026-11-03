@@ -3,7 +3,6 @@ import json
 import os
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
 
 import httpx
 import psycopg
@@ -12,6 +11,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "postgres://sale:sale@localhost:5432/sa
 PAYMENT_URL = os.getenv("PAYMENT_URL", "http://localhost:3001")
 API_URL = os.getenv("API_URL", "http://localhost:3000")
 TOKEN = os.getenv("OPERATOR_TOKEN", "local-operator-token")
+PAYMENT_TOKEN = os.getenv("PAYMENT_INTERNAL_TOKEN", "local-payment-token")
 
 
 def record_case(conn, order_id, kind, details):
@@ -29,37 +29,55 @@ def record_case(conn, order_id, kind, details):
             conn.commit()
 
 
-def reconcile_once(conn, http):
-    with conn.cursor() as cursor:
-        cursor.execute(
-            "SELECT o.id,o.status,r.expires_at,p.kind,p.provider_key,p.status "
+def pending_operations(conn):
+    marker = None
+    while True:
+        query = (
+            "SELECT o.updated_at,o.id,o.status,r.expires_at,p.kind,p.provider_key,p.status,p.amount_cents,"
+            "r.expires_at + interval '30 seconds' <= clock_timestamp() AS close_due "
             "FROM orders o JOIN reservations r ON r.order_id=o.id "
             "JOIN payment_operations p ON p.order_id=o.id "
             "WHERE o.status IN ('PENDING_PAYMENT','PAYMENT_REVIEW','REFUND_PENDING') "
             "AND p.status IN ('IN_FLIGHT','UNKNOWN','SUCCEEDED') "
             "AND NOT (o.status='REFUND_PENDING' AND p.kind='CAPTURE') "
-            "ORDER BY o.updated_at LIMIT 200"
         )
-        operations = cursor.fetchall()
-    for order_id, order_status, expires_at, kind, provider_key, op_status in operations:
+        if marker is not None:
+            query += "AND (o.updated_at,o.id,p.provider_key) > (%s,%s,%s) "
+        query += "ORDER BY o.updated_at,o.id,p.provider_key LIMIT 200"
+        with conn.cursor() as cursor:
+            cursor.execute(query, marker if marker is not None else ())
+            operations = cursor.fetchall()
+        if not operations:
+            break
+        for row in operations:
+            marker = (row[0], row[1], row[5])
+            yield row[1:]
+
+
+def reconcile_once(conn, http):
+    for order_id, order_status, expires_at, kind, provider_key, op_status, amount_cents, close_due in pending_operations(conn):
         if kind == "CAPTURE" and order_status == "REFUND_PENDING":
             continue
         try:
             response = http.get(PAYMENT_URL + "/operations/" + provider_key)
             if response.status_code == 404:
-                if kind == "CAPTURE" and expires_at + timedelta(seconds=30) < datetime.now(timezone.utc):
-                    record_case(conn, order_id, "PAYMENT_NOT_FOUND", {"provider_key": provider_key})
-                continue
-            else:
-                response.raise_for_status()
-                payment = response.json()
-                result = {
-                    "order_id": str(order_id),
-                    "kind": kind,
-                    "status": payment["status"],
-                    "occurred_at": payment["occurred_at"],
-                    "provider_key": provider_key,
-                }
+                if kind == "CAPTURE" and close_due:
+                    response = http.post(
+                        PAYMENT_URL + "/operations/" + provider_key + "/close",
+                        headers={"x-payment-token": PAYMENT_TOKEN},
+                        json={"order_id": str(order_id), "amount_cents": amount_cents},
+                    )
+                else:
+                    continue
+            response.raise_for_status()
+            payment = response.json()
+            result = {
+                "order_id": str(order_id),
+                "kind": kind,
+                "status": payment["status"],
+                "occurred_at": payment["occurred_at"],
+                "provider_key": provider_key,
+            }
             settled = http.post(
                 API_URL + "/internal/settle",
                 headers={"x-operator-token": TOKEN},
@@ -108,10 +126,11 @@ def reconcile_once(conn, http):
                 conn.commit()
 
 
-while True:
-    try:
-        with psycopg.connect(DATABASE_URL) as connection, httpx.Client(timeout=4) as client:
-            reconcile_once(connection, client)
-    except Exception as exc:
-        print("reconciler cycle failed", exc, flush=True)
-    time.sleep(5)
+if __name__ == "__main__":
+    while True:
+        try:
+            with psycopg.connect(DATABASE_URL) as connection, httpx.Client(timeout=4) as client:
+                reconcile_once(connection, client)
+        except Exception as exc:
+            print("reconciler cycle failed", exc, flush=True)
+        time.sleep(5)

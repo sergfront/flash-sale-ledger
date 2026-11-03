@@ -47,7 +47,7 @@ available + reserved + sold = total
 
 The worker leases outbox rows, calls the simulator with `capture:{order_id}`, and settles the result. The simulator has its own PostgreSQL database. Its idempotency key prevents a retry from charging twice. The API deduplicates webhook events and applies conditional order transitions. A payment timeout is an unknown result, so the reservation stays held while the Python service queries the simulator and asks the API to settle it.
 
-Reservations expire after five minutes. If a payment attempt is still uncertain, the order enters `PAYMENT_REVIEW`; stock is not released until the outcome is known. A missing payment-ledger entry after expiry opens an operator case rather than declaring the payment failed, because an in-flight write may still complete. A late successful charge against a released or cancelled reservation creates a refund operation. A failed refund can be retried by the operator with a new provider key while retaining the failed attempt for audit. A monetary refund does not automatically restock the item.
+Reservations expire after five minutes. If a payment attempt is still uncertain, the order enters `PAYMENT_REVIEW`; stock is not released until the outcome is known. After a grace period, reconciliation atomically closes a missing capture key in the simulator ledger: a concurrent capture either wins and is observed, or receives the stored failure. This permits safe release without treating a plain 404 as proof of failure. A late successful charge against a released or cancelled reservation creates a refund operation. A failed refund can be retried by the operator with a new provider key while retaining the failed attempt for audit. A monetary refund does not automatically restock the item.
 
 The queue is PostgreSQL outbox polling. RabbitMQ is a documented next stage for independent consumers; it is not required for the local implementation. The `inbox` table is present for that extension.
 
@@ -76,6 +76,8 @@ npm test
 ```
 
 The tests create an isolated `sale_test` database on the local PostgreSQL server. Set `TEST_DATABASE_URL` to use a different test database. They exercise 5,000 concurrent attempts for 100 units, duplicate settlement, simultaneous idempotency keys, replay of a stock conflict after restocking, a late charge after cancellation, atomic rollback of a multi-SKU order, a charge reported after its reservation was released, and a failed refund retried with a new provider key. The expected result of the concurrency case is exactly 100 reservations and ultimately 100 sold units; all 4,900 losing attempts receive a stock conflict.
+
+With the simulator running, `node load/verify-close.mjs` checks 100 concurrent capture/close races against its durable ledger.
 
 ## Failure demonstration
 
@@ -119,6 +121,6 @@ An empty result is necessary but not sufficient: compare `reserved` with held re
 
 ## Honest portfolio claim
 
-The committed 20-second load report was measured before the refund and reconciliation fixes. Re-run the profile before using its latency numbers to describe this revision.
+The committed [load report](load/REPORT.md) contains fresh 20-second and three-minute runs of this revision, with raw k6 exports and the local machine specification. These are local measurements, not production traffic.
 
 The repository can substantiate the schema, state transitions, fault reproduction, concurrent test results, and any committed load report. It cannot substantiate real customer traffic or a production provider. State measured throughput and latency only after running the script on a recorded machine.
